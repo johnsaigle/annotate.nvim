@@ -1,3 +1,3 @@
-local rfceez = require("rfceez.init")
+local annotate = require("annotate.init")
 
-rfceez.setup()
+annotate.setup()
