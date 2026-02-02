@@ -129,9 +129,15 @@ function M.find_existing_audits(base_path, host, owner, repo)
     end
     
     local audits = {}
-    for _, entry in ipairs(path:readdir()) do
-        local name = vim.fn.fnamemodify(entry, ":t")
-        table.insert(audits, name)
+    local handle = vim.loop.fs_scandir(repo_path)
+    if handle then
+        while true do
+            local name, type = vim.loop.fs_scandir_next(handle)
+            if not name then break end
+            if type == "directory" then
+                table.insert(audits, name)
+            end
+        end
     end
     
     return audits
