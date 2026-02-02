@@ -427,53 +427,65 @@ function M.export(filepath)
     table.insert(lines, "---")
     table.insert(lines, "")
     
-    -- Group notes by file
-    local by_file = {}
+    -- Group notes by type
+    local by_type = {
+        finding = {},
+        question = {},
+        safe = {},
+        suggestion = {}
+    }
+    
     for _, note in ipairs(notes_data.notes) do
-        if not by_file[note.file] then
-            by_file[note.file] = {}
-        end
-        table.insert(by_file[note.file], note)
+        table.insert(by_type[note.type], note)
     end
     
-    -- Sort files alphabetically
-    local files = {}
-    for file, _ in pairs(by_file) do
-        table.insert(files, file)
-    end
-    table.sort(files)
-    
-    -- Output notes by file
-    for _, file in ipairs(files) do
-        table.insert(lines, string.format("## %s", file))
-        table.insert(lines, "")
-        
-        for _, note in ipairs(by_file[file]) do
-            -- Format type as uppercase
-            local type_label = note.type:upper()
-            
-            -- Generate permalink
-            local permalink = generate_permalink(
-                session.host, session.owner, session.repo,
-                note.commit, note.file, note.line
-            )
-            
-            if permalink then
-                table.insert(lines, string.format("### Line %d [%s]", 
-                                                  note.line, type_label))
-                table.insert(lines, string.format("**Link:** %s", permalink))
-            else
-                table.insert(lines, string.format("### Line %d [%s]", 
-                                                  note.line, type_label))
+    -- Sort notes within each type by file, then line
+    for _, notes in pairs(by_type) do
+        table.sort(notes, function(a, b)
+            if a.file == b.file then
+                return a.line < b.line
             end
+            return a.file < b.file
+        end)
+    end
+    
+    -- Output notes by type in priority order
+    local type_order = {
+        {key = "finding", label = "Findings", icon = "🔴"},
+        {key = "question", label = "Questions", icon = "🟡"},
+        {key = "suggestion", label = "Suggestions", icon = "🔵"},
+        {key = "safe", label = "Marked Safe", icon = "🟢"},
+    }
+    
+    for _, type_info in ipairs(type_order) do
+        local notes = by_type[type_info.key]
+        
+        if #notes > 0 then
+            table.insert(lines, string.format("## %s %s", type_info.icon, type_info.label))
+            table.insert(lines, "")
             
-            table.insert(lines, string.format("Added: %s", 
-                                              note.created_at:sub(1, 10)))
-            table.insert(lines, "")
-            table.insert(lines, note.text)
-            table.insert(lines, "")
-            table.insert(lines, "---")
-            table.insert(lines, "")
+            for _, note in ipairs(notes) do
+                -- Generate permalink
+                local permalink = generate_permalink(
+                    session.host, session.owner, session.repo,
+                    note.commit, note.file, note.line
+                )
+                
+                if permalink then
+                    table.insert(lines, string.format("### %s:%d", note.file, note.line))
+                    table.insert(lines, string.format("**Link:** %s", permalink))
+                else
+                    table.insert(lines, string.format("### %s:%d", note.file, note.line))
+                end
+                
+                table.insert(lines, string.format("Added: %s", 
+                                                  note.created_at:sub(1, 10)))
+                table.insert(lines, "")
+                table.insert(lines, note.text)
+                table.insert(lines, "")
+                table.insert(lines, "---")
+                table.insert(lines, "")
+            end
         end
     end
     
