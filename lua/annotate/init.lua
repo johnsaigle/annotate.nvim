@@ -38,7 +38,7 @@ local function get_current_session()
     
     -- Check if in git repo
     if not git.is_git_repo() then
-        vim.notify("Not in a git repository. Annotate requires git.", vim.log.levels.ERROR)
+        vim.notify("Not in a git repository. Annotate requires git.", vim.log.levels.DEBUG)
         return nil
     end
     
