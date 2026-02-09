@@ -3,7 +3,7 @@ local M = {}
 ---@class AnnotateNote
 ---@field file string relative path from repo root
 ---@field line number line number
----@field type string "finding"|"question"|"safe"|"suggestion"
+---@field type string "finding"|"question"|"safe"|"suggestion"|"comment"|"invariant"
 ---@field text string note content
 ---@field created_at string ISO8601 timestamp
 ---@field commit string commit hash when note was created
