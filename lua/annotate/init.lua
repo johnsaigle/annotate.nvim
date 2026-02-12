@@ -195,6 +195,37 @@ local function calculate_stats(notes)
     return stats
 end
 
+--- Generate fingerprint for a note based on context
+--- Fingerprint is based on: filepath, line content, and 2 lines before/after
+--- @param filepath string relative file path
+--- @param line_num number line number
+--- @return string fingerprint hash
+local function generate_fingerprint(filepath, line_num)
+    local bufnr = vim.fn.bufnr("%")
+    local line_count = vim.api.nvim_buf_line_count(bufnr)
+
+    -- Get context lines (2 before, the line itself, 2 after)
+    local start_line = math.max(0, line_num - 3)  -- 0-indexed for nvim_buf_get_lines
+    local end_line = math.min(line_count, line_num + 2)
+    local lines = vim.api.nvim_buf_get_lines(bufnr, start_line, end_line, false)
+
+    -- Build fingerprint string: filepath + surrounding context
+    local context = filepath .. ":"
+    for _, line_content in ipairs(lines) do
+        -- Normalize whitespace
+        context = context .. line_content:gsub("%s+", " "):gsub("^%s*", ""):gsub("%s*$", "") .. "|"
+    end
+
+    -- Simple hash function (djb2)
+    local hash = 5381
+    for i = 1, #context do
+        hash = ((hash << 5) + hash) + string.byte(context, i)
+        hash = hash & 0xFFFFFFFF
+    end
+
+    return string.format("%08x", hash)
+end
+
 --- Add a note with type and text
 --- @param note_type string
 --- @param text string
@@ -203,23 +234,27 @@ function M.add_note(note_type, text)
     if not session then
         return
     end
-    
+
     local parts = vim.fn.getpos(".")
     local line = parts[2]
-    
+
+    -- Generate fingerprint
+    local fingerprint = generate_fingerprint(session.relative_file, line)
+
     local note = {
         file = session.relative_file,
         line = line,
         type = note_type,
         text = text,
         created_at = os.date("!%Y-%m-%dT%H:%M:%SZ"),
-        commit = session.commit
+        commit = session.commit,
+        fingerprint = fingerprint
     }
-    
+
     -- Load existing notes
     local notes_data = storage.load_notes(session.path)
     table.insert(notes_data.notes, note)
-    
+
     -- Sort by file, then line
     table.sort(notes_data.notes, function(a, b)
         if a.file == b.file then
@@ -227,15 +262,15 @@ function M.add_note(note_type, text)
         end
         return a.file < b.file
     end)
-    
+
     -- Save
     storage.save_notes(session.path, notes_data)
-    
+
     -- Update metadata timestamp
     local metadata = storage.load_metadata(session.path)
     metadata.last_modified = os.date("!%Y-%m-%dT%H:%M:%SZ")
     storage.save_metadata(session.path, metadata)
-    
+
     -- Refresh highlights
     session.highlights = Highlights.AnnotateHighlights:new(
         notes_data.notes, session.relative_file
@@ -480,6 +515,43 @@ local function generate_permalink(host, owner, repo, commit, file, line)
     return nil
 end
 
+--- Extract the first sentence or first line from text
+--- @param text string
+--- @return string title
+local function extract_title(text)
+    if not text or text == "" then
+        return "Untitled Note"
+    end
+
+    -- Find the first sentence (ends with . ! ? followed by space or end of string)
+    -- First, try to find a sentence-ending punctuation
+    local first_sentence = text:match("^([^%.%!%?]+[%.%!%?])")
+
+    if first_sentence then
+        -- Clean up whitespace
+        first_sentence = first_sentence:gsub("^%s*", ""):gsub("%s*$", "")
+        if #first_sentence > 0 and #first_sentence < #text then
+            return first_sentence
+        end
+    end
+
+    -- If no sentence found or it's the whole text, return the first line
+    local first_line = text:match("^([^\n]+)")
+    if first_line then
+        first_line = first_line:gsub("^%s*", ""):gsub("%s*$", "")
+        if #first_line > 60 then
+            first_line = first_line:sub(1, 57) .. "..."
+        end
+        return first_line
+    end
+
+    -- Fallback: truncate text
+    if #text > 60 then
+        return text:sub(1, 57) .. "..."
+    end
+    return text
+end
+
 --- Export all notes to markdown
 --- @param filepath string|nil output path (defaults to ./audit-report.md)
 function M.export(filepath)
@@ -487,27 +559,27 @@ function M.export(filepath)
     if not session then
         return
     end
-    
+
     -- Default output path
     local output_path = filepath or "./audit-report.md"
-    
+
     -- Load all notes
     local notes_data = storage.load_notes(session.path)
     local metadata = storage.load_metadata(session.path)
-    
+
     -- Generate markdown
     local lines = {}
-    
+
     -- Header
-    table.insert(lines, string.format("# Audit Report: %s/%s", 
+    table.insert(lines, string.format("# Audit Report: %s/%s",
                                       session.owner, session.repo))
     table.insert(lines, string.format("Ref: %s", metadata.base_ref))
-    table.insert(lines, string.format("Started: %s", 
+    table.insert(lines, string.format("Started: %s",
                                       metadata.created_at:sub(1, 10)))
-    table.insert(lines, string.format("Last Updated: %s", 
+    table.insert(lines, string.format("Last Updated: %s",
                                       metadata.last_modified:sub(1, 10)))
     table.insert(lines, "")
-    
+
     -- Summary statistics
     local stats = calculate_stats(notes_data.notes)
     table.insert(lines, "## Summary")
@@ -520,7 +592,7 @@ function M.export(filepath)
     table.insert(lines, "")
     table.insert(lines, "---")
     table.insert(lines, "")
-    
+
     -- Group notes by type
     local by_type = {
         finding = {},
@@ -530,11 +602,11 @@ function M.export(filepath)
         comment = {},
         invariant = {}
     }
-    
+
     for _, note in ipairs(notes_data.notes) do
         table.insert(by_type[note.type], note)
     end
-    
+
     -- Sort notes within each type by file, then line
     for _, notes in pairs(by_type) do
         table.sort(notes, function(a, b)
@@ -544,7 +616,7 @@ function M.export(filepath)
             return a.file < b.file
         end)
     end
-    
+
     -- Output notes by type in priority order
     local type_order = {
         {key = "finding", label = "Findings", icon = "🔴"},
@@ -554,39 +626,44 @@ function M.export(filepath)
         {key = "comment", label = "Comments", icon = "⚪"},
         {key = "invariant", label = "Invariants", icon = "🟣"},
     }
-    
+
     for _, type_info in ipairs(type_order) do
         local notes = by_type[type_info.key]
-        
+
         if #notes > 0 then
             table.insert(lines, string.format("## %s %s", type_info.icon, type_info.label))
             table.insert(lines, "")
-            
+
             for _, note in ipairs(notes) do
                 -- Generate permalink
                 local permalink = generate_permalink(
                     session.host, session.owner, session.repo,
                     note.commit, note.file, note.line
                 )
-                
-                if permalink then
-                    table.insert(lines, string.format("### %s:%d", note.file, note.line))
-                    table.insert(lines, string.format("**Link:** %s", permalink))
-                else
-                    table.insert(lines, string.format("### %s:%d", note.file, note.line))
-                end
-                
-                table.insert(lines, string.format("Added: %s", 
-                                                  note.created_at:sub(1, 10)))
+
+                -- Extract title from first sentence
+                local title = extract_title(note.text)
+                table.insert(lines, string.format("### %s", title))
                 table.insert(lines, "")
+
+                -- Output full description
                 table.insert(lines, note.text)
+                table.insert(lines, "")
+
+                -- Output file link in markdown format
+                if permalink then
+                    table.insert(lines, string.format("[%s:%d](%s)", note.file, note.line, permalink))
+                else
+                    table.insert(lines, string.format("`%s:%d`", note.file, note.line))
+                end
+
                 table.insert(lines, "")
                 table.insert(lines, "---")
                 table.insert(lines, "")
             end
         end
     end
-    
+
     -- Write to file
     local output = table.concat(lines, "\n")
     local file_handle = io.open(output_path, "w")
@@ -594,12 +671,12 @@ function M.export(filepath)
         vim.notify("Failed to write export file: " .. output_path, vim.log.levels.ERROR)
         return
     end
-    
+
     file_handle:write(output)
     file_handle:close()
-    
+
     -- Use echo instead of notify to avoid "Press ENTER" prompt
-    vim.cmd(string.format('echo "Exported %d notes to %s"', 
+    vim.cmd(string.format('echo "Exported %d notes to %s"',
                          #notes_data.notes, output_path))
 end
 
@@ -717,6 +794,458 @@ function M.clean_all()
     local removed = storage.clean_all_empty(base_path)
 
     vim.notify(string.format("Cleaned %d empty audit session(s) globally", removed), vim.log.levels.INFO)
+end
+
+--- Get all sessions for the current repository
+--- @return table array of {commit, path, notes_data, metadata} objects
+local function get_all_repo_sessions()
+    local current_file = get_current_name()
+    local session = sessions[current_file]
+
+    if not session then
+        -- Try to get basic git info without creating a session
+        if not git.is_git_repo() then
+            vim.notify("Not in a git repository.", vim.log.levels.ERROR)
+            return {}
+        end
+
+        local repo_root = git.get_repo_root()
+        local remote_url = git.get_remote_url()
+
+        if not repo_root or not remote_url then
+            vim.notify("Failed to get repository information.", vim.log.levels.ERROR)
+            return {}
+        end
+
+        local parsed = git.parse_git_url(remote_url)
+        if not parsed then
+            vim.notify("Failed to parse git remote URL.", vim.log.levels.ERROR)
+            return {}
+        end
+
+        local base_path = storage.get_data_path()
+        local repo_path = string.format("%s/%s/%s/%s", base_path, parsed.host, parsed.owner, parsed.repo)
+        local Path = require("plenary.path")
+        local path = Path:new(repo_path)
+
+        if not path:exists() then
+            return {}
+        end
+
+        local all_sessions = {}
+        local handle = vim.loop.fs_scandir(repo_path)
+        if handle then
+            while true do
+                local name, type = vim.loop.fs_scandir_next(handle)
+                if not name then break end
+                if type == "directory" then
+                    local session_path = repo_path .. "/" .. name
+                    local notes_file = session_path .. "/notes.json"
+                    if Path:new(notes_file):exists() then
+                        local notes_data = storage.load_notes(session_path)
+                        local metadata = storage.load_metadata(session_path)
+                        if notes_data and metadata then
+                            table.insert(all_sessions, {
+                                commit = name,
+                                path = session_path,
+                                notes_data = notes_data,
+                                metadata = metadata
+                            })
+                        end
+                    end
+                end
+            end
+        end
+
+        return all_sessions
+    else
+        -- Use existing session info
+        local base_path = storage.get_data_path()
+        local repo_path = string.format("%s/%s/%s/%s", base_path, session.host, session.owner, session.repo)
+        local Path = require("plenary.path")
+        local path = Path:new(repo_path)
+
+        if not path:exists() then
+            return {}
+        end
+
+        local all_sessions = {}
+        local handle = vim.loop.fs_scandir(repo_path)
+        if handle then
+            while true do
+                local name, type = vim.loop.fs_scandir_next(handle)
+                if not name then break end
+                if type == "directory" then
+                    local session_path = repo_path .. "/" .. name
+                    local notes_file = session_path .. "/notes.json"
+                    if Path:new(notes_file):exists() then
+                        local notes_data = storage.load_notes(session_path)
+                        local metadata = storage.load_metadata(session_path)
+                        if notes_data and metadata then
+                            table.insert(all_sessions, {
+                                commit = name,
+                                path = session_path,
+                                notes_data = notes_data,
+                                metadata = metadata
+                            })
+                        end
+                    end
+                end
+            end
+        end
+
+        return all_sessions
+    end
+end
+
+--- Diff two sessions and find matching/non-matching notes by fingerprint
+--- @param session1_commit string commit hash of first session
+--- @param session2_commit string commit hash of second session
+--- @return table|nil diff result with matching, orphaned1, and orphaned2 arrays
+function M.diff_sessions(session1_commit, session2_commit)
+    local all_sessions = get_all_repo_sessions()
+
+    if #all_sessions < 2 then
+        vim.notify("Need at least 2 audit sessions to diff", vim.log.levels.ERROR)
+        return nil
+    end
+
+    -- Find the two sessions
+    local s1, s2
+    for _, s in ipairs(all_sessions) do
+        if s.commit == session1_commit then
+            s1 = s
+        elseif s.commit == session2_commit then
+            s2 = s
+        end
+    end
+
+    if not s1 then
+        vim.notify("Session not found: " .. session1_commit, vim.log.levels.ERROR)
+        return nil
+    end
+
+    if not s2 then
+        vim.notify("Session not found: " .. session2_commit, vim.log.levels.ERROR)
+        return nil
+    end
+
+    -- Build fingerprint maps
+    local fingerprints1 = {}
+    local fingerprints2 = {}
+
+    for _, note in ipairs(s1.notes_data.notes) do
+        if note.fingerprint then
+            fingerprints1[note.fingerprint] = fingerprints1[note.fingerprint] or {}
+            table.insert(fingerprints1[note.fingerprint], note)
+        end
+    end
+
+    for _, note in ipairs(s2.notes_data.notes) do
+        if note.fingerprint then
+            fingerprints2[note.fingerprint] = fingerprints2[note.fingerprint] or {}
+            table.insert(fingerprints2[note.fingerprint], note)
+        end
+    end
+
+    -- Find matches and orphans
+    local matching = {}
+    local orphaned1 = {}
+    local orphaned2 = {}
+
+    -- Find matches and orphaned from session 1
+    for fp, notes in pairs(fingerprints1) do
+        if fingerprints2[fp] then
+            -- Match found
+            table.insert(matching, {
+                fingerprint = fp,
+                notes1 = notes,
+                notes2 = fingerprints2[fp]
+            })
+        else
+            -- Orphaned from session 1
+            for _, note in ipairs(notes) do
+                table.insert(orphaned1, note)
+            end
+        end
+    end
+
+    -- Find orphaned from session 2
+    for fp, notes in pairs(fingerprints2) do
+        if not fingerprints1[fp] then
+            for _, note in ipairs(notes) do
+                table.insert(orphaned2, note)
+            end
+        end
+    end
+
+    return {
+        session1 = session1_commit,
+        session2 = session2_commit,
+        matching = matching,
+        orphaned1 = orphaned1,
+        orphaned2 = orphaned2
+    }
+end
+
+--- Show diff between current session and another session
+function M.show_diff()
+    local all_sessions = get_all_repo_sessions()
+
+    if #all_sessions < 2 then
+        vim.notify("Need at least 2 audit sessions to diff", vim.log.levels.ERROR)
+        return
+    end
+
+    -- Get current session commit
+    local current_file = get_current_name()
+    local current_session = sessions[current_file]
+    local current_commit = current_session and current_session.commit or all_sessions[1].commit
+
+    -- Let user select which session to compare with
+    local items = {}
+    for _, s in ipairs(all_sessions) do
+        if s.commit ~= current_commit then
+            table.insert(items, {
+                commit = s.commit,
+                display = string.format("%s (created: %s, notes: %d)",
+                    s.commit:sub(1, 7),
+                    s.metadata.created_at:sub(1, 10),
+                    #s.notes_data.notes)
+            })
+        end
+    end
+
+    if #items == 0 then
+        vim.notify("No other sessions to compare with", vim.log.levels.INFO)
+        return
+    end
+
+    vim.ui.select(items, {
+        prompt = "Select session to compare with:",
+        format_item = function(item)
+            return item.display
+        end
+    }, function(choice)
+        if not choice then
+            return
+        end
+
+        local diff = M.diff_sessions(current_commit, choice.commit)
+        if not diff then
+            return
+        end
+
+        -- Build display
+        local lines = {
+            string.format("Diff: %s vs %s", diff.session1:sub(1, 7), diff.session2:sub(1, 7)),
+            "",
+            string.format("Matching notes (same fingerprint): %d", #diff.matching),
+            string.format("Orphaned in %s: %d", diff.session1:sub(1, 7), #diff.orphaned1),
+            string.format("Orphaned in %s: %d", diff.session2:sub(1, 7), #diff.orphaned2),
+            "",
+            "Press 'r' to restore orphaned notes to current session",
+            "Press 'h' to harmonize all sessions into current",
+            "Press 'q' or <Esc> to close",
+            ""
+        }
+
+        -- Show orphaned notes from session 2 (can be restored)
+        if #diff.orphaned2 > 0 then
+            table.insert(lines, "=== Notes that can be restored ===")
+            for _, note in ipairs(diff.orphaned2) do
+                local preview = note.text:sub(1, 50)
+                if #note.text > 50 then
+                    preview = preview .. "..."
+                end
+                table.insert(lines, string.format("[%s] %s:%d - %s",
+                    note.type:upper(), note.file, note.line, preview))
+            end
+        end
+
+        local buf = vim.api.nvim_create_buf(false, true)
+        vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+
+        local width = math.min(80, vim.o.columns - 4)
+        local height = math.min(#lines + 2, vim.o.lines - 4)
+
+        local win = vim.api.nvim_open_win(buf, true, {
+            relative = 'editor',
+            width = width,
+            height = height,
+            row = math.floor((vim.o.lines - height) / 2),
+            col = math.floor((vim.o.columns - width) / 2),
+            style = 'minimal',
+            border = 'rounded',
+            title = ' Audit Session Diff ',
+            title_pos = 'center'
+        })
+
+        -- Set up keymaps
+        vim.api.nvim_buf_set_keymap(buf, 'n', 'q', ':close<CR>',
+            {nowait = true, noremap = true, silent = true})
+        vim.api.nvim_buf_set_keymap(buf, 'n', '<Esc>', ':close<CR>',
+            {nowait = true, noremap = true, silent = true})
+        vim.api.nvim_buf_set_keymap(buf, 'n', 'r', '', {
+            nowait = true, noremap = true, silent = true,
+            callback = function()
+                vim.api.nvim_win_close(win, true)
+                M.restore_orphaned(diff.session2, diff.orphaned2)
+            end
+        })
+        vim.api.nvim_buf_set_keymap(buf, 'n', 'h', '', {
+            nowait = true, noremap = true, silent = true,
+            callback = function()
+                vim.api.nvim_win_close(win, true)
+                M.harmonize_sessions()
+            end
+        })
+    end)
+end
+
+--- Restore orphaned notes from another session to current session
+--- @param source_commit string commit hash of source session
+--- @param orphaned_notes table array of notes to restore
+function M.restore_orphaned(source_commit, orphaned_notes)
+    local session = get_current_session(true)
+    if not session then
+        return
+    end
+
+    if not orphaned_notes or #orphaned_notes == 0 then
+        vim.notify("No orphaned notes to restore", vim.log.levels.INFO)
+        return
+    end
+
+    -- Load current notes
+    local notes_data = storage.load_notes(session.path)
+
+    -- Add orphaned notes
+    local restored_count = 0
+    for _, note in ipairs(orphaned_notes) do
+        -- Update note with new commit info
+        local restored_note = {
+            file = note.file,
+            line = note.line,
+            type = note.type,
+            text = note.text,
+            created_at = note.created_at,
+            commit = session.commit,  -- Update to current commit
+            fingerprint = note.fingerprint,
+            restored_from = source_commit  -- Track origin
+        }
+        table.insert(notes_data.notes, restored_note)
+        restored_count = restored_count + 1
+    end
+
+    -- Sort
+    table.sort(notes_data.notes, function(a, b)
+        if a.file == b.file then
+            return a.line < b.line
+        end
+        return a.file < b.file
+    end)
+
+    -- Save
+    storage.save_notes(session.path, notes_data)
+
+    -- Update metadata
+    local metadata = storage.load_metadata(session.path)
+    metadata.last_modified = os.date("!%Y-%m-%dT%H:%M:%SZ")
+    storage.save_metadata(session.path, metadata)
+
+    -- Refresh highlights
+    session.highlights = Highlights.AnnotateHighlights:new(
+        notes_data.notes, session.relative_file
+    )
+    session.highlights:refresh_highlights()
+
+    vim.notify(string.format("Restored %d orphaned note(s)", restored_count), vim.log.levels.INFO)
+end
+
+--- Harmonize all sessions into current session
+--- Combines notes from all sessions, keeping unique fingerprints
+function M.harmonize_sessions()
+    local session = get_current_session(true)
+    if not session then
+        return
+    end
+
+    local all_sessions = get_all_repo_sessions()
+    if #all_sessions <= 1 then
+        vim.notify("No other sessions to harmonize", vim.log.levels.INFO)
+        return
+    end
+
+    -- Load current notes and build fingerprint set
+    local notes_data = storage.load_notes(session.path)
+    local existing_fingerprints = {}
+
+    for _, note in ipairs(notes_data.notes) do
+        if note.fingerprint then
+            existing_fingerprints[note.fingerprint] = true
+        end
+    end
+
+    -- Collect unique notes from other sessions
+    local harmonized_count = 0
+    for _, s in ipairs(all_sessions) do
+        if s.commit ~= session.commit then
+            for _, note in ipairs(s.notes_data.notes) do
+                if note.fingerprint and not existing_fingerprints[note.fingerprint] then
+                    local harmonized_note = {
+                        file = note.file,
+                        line = note.line,
+                        type = note.type,
+                        text = note.text,
+                        created_at = note.created_at,
+                        commit = session.commit,
+                        fingerprint = note.fingerprint,
+                        harmonized_from = s.commit
+                    }
+                    table.insert(notes_data.notes, harmonized_note)
+                    existing_fingerprints[note.fingerprint] = true
+                    harmonized_count = harmonized_count + 1
+                end
+            end
+        end
+    end
+
+    if harmonized_count == 0 then
+        vim.notify("All notes are already harmonized", vim.log.levels.INFO)
+        return
+    end
+
+    -- Sort
+    table.sort(notes_data.notes, function(a, b)
+        if a.file == b.file then
+            return a.line < b.line
+        end
+        return a.file < b.file
+    end)
+
+    -- Save
+    storage.save_notes(session.path, notes_data)
+
+    -- Update metadata
+    local metadata = storage.load_metadata(session.path)
+    metadata.last_modified = os.date("!%Y-%m-%dT%H:%M:%SZ")
+    metadata.harmonized_from = {}
+    for _, s in ipairs(all_sessions) do
+        if s.commit ~= session.commit then
+            table.insert(metadata.harmonized_from, s.commit)
+        end
+    end
+    storage.save_metadata(session.path, metadata)
+
+    -- Refresh highlights
+    session.highlights = Highlights.AnnotateHighlights:new(
+        notes_data.notes, session.relative_file
+    )
+    session.highlights:refresh_highlights()
+
+    vim.notify(string.format("Harmonized %d unique note(s) from %d session(s)",
+        harmonized_count, #all_sessions - 1), vim.log.levels.INFO)
 end
 
 return M

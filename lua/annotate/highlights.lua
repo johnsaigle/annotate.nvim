@@ -7,6 +7,7 @@ local M = {}
 ---@field text string note content
 ---@field created_at string ISO8601 timestamp
 ---@field commit string commit hash when note was created
+---@field fingerprint string|nil hash of filepath and context lines
 
 ---@class AnnotateHighlights
 ---@field notes AnnotateNote[] all notes for current file
@@ -76,43 +77,69 @@ function AnnotateHighlights:nav_next()
     vim.api.nvim_feedkeys("_", "m", true)
 end
 
+--- Map note type to highlight group
+--- @param note_type string
+--- @return string highlight group name
+local function get_highlight_group(note_type)
+    local type_to_hl = {
+        finding = "AnnotateFinding",
+        question = "AnnotateQuestion",
+        safe = "AnnotateSafe",
+        suggestion = "AnnotateSuggestion",
+        comment = "AnnotateComment",
+        invariant = "AnnotateInvariant"
+    }
+    return type_to_hl[note_type] or "Normal"
+end
+
 --- Show notes at cursor in popup window
 function AnnotateHighlights:show_notes()
     self:close_notes()
-    
+
     if #self.notes == 0 then
         return
     end
-    
+
     local parts = vim.fn.getpos(".")
     local line = parts[2]
-    
+
     local cursor_notes = {}
     for _, note in ipairs(self.notes) do
         if note.line == line then
             table.insert(cursor_notes, note)
         end
     end
-    
+
     if #cursor_notes == 0 then
         return
     end
-    
+
     local lines = {}
+    local title_lines = {} -- Track which lines are titles (for highlighting)
     local requires_headers = #cursor_notes > 1
-    
+
     for i, note in ipairs(cursor_notes) do
+        local title_line
         if requires_headers then
-            table.insert(lines, string.format("Note %d [%s]", i, note.type:upper()))
+            title_line = string.format("Note %d [%s]", i, note.type:upper())
         else
-            table.insert(lines, string.format("[%s]", note.type:upper()))
+            title_line = string.format("[%s]", note.type:upper())
         end
+        table.insert(lines, title_line)
+        table.insert(title_lines, {line = #lines, type = note.type})
         table.insert(lines, note.text)
         table.insert(lines, "")
     end
-    
+
     local buf_id = vim.api.nvim_create_buf(false, true)
     vim.api.nvim_buf_set_lines(buf_id, 0, -1, false, lines)
+
+    -- Apply highlight groups to title lines
+    for _, title_info in ipairs(title_lines) do
+        local hl_group = get_highlight_group(title_info.type)
+        vim.api.nvim_buf_add_highlight(buf_id, -1, hl_group, title_info.line - 1, 0, -1)
+    end
+
     local win_id = vim.api.nvim_open_win(buf_id, false, {
         relative = "cursor",
         width = 50,
@@ -122,7 +149,7 @@ function AnnotateHighlights:show_notes()
         style = "minimal",
         border = "rounded"
     })
-    
+
     self.buf_id = buf_id
     self.win_id = win_id
 end
