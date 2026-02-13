@@ -552,6 +552,124 @@ local function extract_title(text)
     return text
 end
 
+--- Export a single note at cursor to markdown
+--- @param filepath string|nil output path (defaults to ./single-note.md)
+function M.export_single(filepath)
+    local session = get_current_session()
+    if not session then
+        return
+    end
+
+    -- Get current cursor position
+    local parts = vim.fn.getpos(".")
+    local line = parts[2]
+
+    -- Load all notes
+    local notes_data = storage.load_notes(session.path)
+    local metadata = storage.load_metadata(session.path)
+
+    -- Find notes at this line in this file
+    local notes_at_line = {}
+    for i, note in ipairs(notes_data.notes) do
+        if note.file == session.relative_file and note.line == line then
+            table.insert(notes_at_line, {index = i, note = note})
+        end
+    end
+
+    if #notes_at_line == 0 then
+        vim.notify("No note found at current line", vim.log.levels.WARN)
+        return
+    end
+
+    -- If multiple notes, let user choose
+    local selected_note
+    if #notes_at_line == 1 then
+        selected_note = notes_at_line[1].note
+    else
+        local items = {}
+        for _, item in ipairs(notes_at_line) do
+            local note = item.note
+            local preview = note.text:sub(1, 50)
+            if #note.text > 50 then
+                preview = preview .. "..."
+            end
+            table.insert(items, {
+                note_index = item.index,
+                display = string.format("[%s] %s", note.type:upper(), preview),
+                note = note
+            })
+        end
+
+        vim.ui.select(items, {
+            prompt = string.format("Select note to export (%d found):", #notes_at_line),
+            format_item = function(item)
+                return item.display
+            end
+        }, function(choice)
+            if not choice then
+                return
+            end
+            -- Call export with the selected note
+            M._do_export_single(choice.note, session, metadata, filepath)
+        end)
+        return
+    end
+
+    M._do_export_single(selected_note, session, metadata, filepath)
+end
+
+--- Internal: Export a single note to markdown
+--- Uses the same format as an individual finding in the full report
+--- @param note table the note to export
+--- @param session AnnotateSession the current session
+--- @param metadata table session metadata
+--- @param filepath string|nil output path
+function M._do_export_single(note, session, metadata, filepath)
+    -- Default output path
+    local output_path = filepath or "./single-note.md"
+
+    -- Generate markdown using the same per-finding format as export()
+    local lines = {}
+
+    -- Generate permalink
+    local permalink = generate_permalink(
+        session.host, session.owner, session.repo,
+        note.commit, note.file, note.line
+    )
+
+    -- Extract title from first sentence
+    local title = extract_title(note.text)
+    table.insert(lines, string.format("### %s", title))
+    table.insert(lines, "")
+
+    -- Output full description
+    table.insert(lines, note.text)
+    table.insert(lines, "")
+
+    -- Output file link in markdown format
+    if permalink then
+        table.insert(lines, string.format("[%s:%d](%s)", note.file, note.line, permalink))
+    else
+        table.insert(lines, string.format("`%s:%d`", note.file, note.line))
+    end
+
+    table.insert(lines, "")
+    table.insert(lines, "---")
+
+    -- Write to file
+    local output = table.concat(lines, "\n")
+    local file_handle = io.open(output_path, "w")
+    if not file_handle then
+        vim.notify("Failed to write export file: " .. output_path, vim.log.levels.ERROR)
+        return
+    end
+
+    file_handle:write(output)
+    file_handle:close()
+
+    vim.cmd(string.format('echo "Exported note to %s"', output_path))
+end
+
 --- Export all notes to markdown
 --- @param filepath string|nil output path (defaults to ./audit-report.md)
 function M.export(filepath)
