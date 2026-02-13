@@ -217,10 +217,10 @@ local function generate_fingerprint(filepath, line_num)
     end
 
     -- Simple hash function (djb2)
+    local bit = require("bit")
     local hash = 5381
     for i = 1, #context do
-        hash = ((hash << 5) + hash) + string.byte(context, i)
-        hash = hash & 0xFFFFFFFF
+        hash = bit.band(bit.lshift(hash, 5) + hash + string.byte(context, i), 0xFFFFFFFF)
     end
 
     return string.format("%08x", hash)
