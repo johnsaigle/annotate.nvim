@@ -43,6 +43,37 @@ local augroup = vim.api.nvim_create_augroup
 local AnnotateGroup = augroup("AnnotateGroup", {})
 local autocmd = vim.api.nvim_create_autocmd
 
+local function update_session_notes(session, notes_data)
+    storage.save_notes(session.path, notes_data)
+
+    local metadata = storage.load_metadata(session.path)
+    metadata.last_modified = os.date("!%Y-%m-%dT%H:%M:%SZ")
+    storage.save_metadata(session.path, metadata)
+
+    session.highlights = Highlights.AnnotateHighlights:new(notes_data.notes, session.relative_file)
+    session.highlights:refresh_highlights()
+end
+
+local function get_notes_at_line(notes_data, file, line)
+    local notes_at_line = {}
+    for i, note in ipairs(notes_data.notes) do
+        if note.file == file and note.line == line then
+            table.insert(notes_at_line, { index = i, note = note })
+        end
+    end
+
+    return notes_at_line
+end
+
+local function note_preview(note)
+    local preview = note.text:sub(1, 40)
+    if #note.text > 40 then
+        preview = preview .. "..."
+    end
+
+    return string.format("[%s] %s", note.type:upper(), preview)
+end
+
 --- Get current file's buffer name
 --- @return string
 local function get_current_name()
@@ -204,6 +235,14 @@ function M.setup()
             return NOTE_TYPES
         end,
     })
+
+    vim.api.nvim_create_user_command("AnnotateEdit", function()
+        M.edit()
+    end, {})
+
+    vim.api.nvim_create_user_command("AnnotateExportNote", function(opts)
+        M.export_note(opts.args ~= "" and opts.args or nil)
+    end, { nargs = "?", complete = "file" })
 end
 
 --- Helper to calculate statistics
@@ -419,12 +458,7 @@ function M.rm()
     local notes_data = storage.load_notes(session.path)
 
     -- Find notes at this line in this file
-    local notes_at_line = {}
-    for i, note in ipairs(notes_data.notes) do
-        if note.file == session.relative_file and note.line == line then
-            table.insert(notes_at_line, { index = i, note = note })
-        end
-    end
+    local notes_at_line = get_notes_at_line(notes_data, session.relative_file, line)
 
     if #notes_at_line == 0 then
         return
@@ -440,16 +474,11 @@ function M.rm()
         -- Multiple notes - let user choose which to delete
         local items = {}
         for i, item in ipairs(notes_at_line) do
-            local note = item.note
-            local preview = note.text:sub(1, 40)
-            if #note.text > 40 then
-                preview = preview .. "..."
-            end
             table.insert(items, {
                 index = i,
                 note_index = item.index,
-                display = string.format("[%s] %s", note.type:upper(), preview),
-                note = note,
+                display = note_preview(item.note),
+                note = item.note,
             })
         end
 
@@ -512,6 +541,61 @@ function M.rm()
     session.highlights:refresh_highlights()
 
     vim.notify("Note deleted", vim.log.levels.INFO)
+end
+
+--- Edit note at cursor
+function M.edit()
+    local session = get_current_session()
+    if not session then
+        return
+    end
+
+    local parts = vim.fn.getpos(".")
+    local line = parts[2]
+
+    local notes_data = storage.load_notes(session.path)
+    local notes_at_line = get_notes_at_line(notes_data, session.relative_file, line)
+    if #notes_at_line == 0 then
+        return
+    end
+
+    local function edit_note(item)
+        local new_text = vim.fn.input({ prompt = "Note: ", default = item.note.text })
+        if new_text == "" or new_text == item.note.text then
+            return
+        end
+
+        notes_data.notes[item.index].text = new_text
+        update_session_notes(session, notes_data)
+        vim.notify("Note edited", vim.log.levels.INFO)
+    end
+
+    if #notes_at_line == 1 then
+        edit_note(notes_at_line[1])
+        return
+    end
+
+    local items = {}
+    for _, item in ipairs(notes_at_line) do
+        table.insert(items, {
+            index = item.index,
+            display = note_preview(item.note),
+            note = item.note,
+        })
+    end
+
+    vim.ui.select(items, {
+        prompt = string.format("Select note to edit (%d found):", #notes_at_line),
+        format_item = function(item)
+            return item.display
+        end,
+    }, function(choice)
+        if not choice then
+            return
+        end
+
+        edit_note(choice)
+    end)
 end
 
 --- Remove all notes in current file
@@ -598,6 +682,24 @@ local function generate_permalink(host, owner, repo, commit, file, line)
     return nil
 end
 
+local function append_note_export(lines, session, note)
+    local permalink = generate_permalink(session.host, session.owner, session.repo, note.commit, note.file, note.line)
+
+    if permalink then
+        table.insert(lines, string.format("### %s:%d", note.file, note.line))
+        table.insert(lines, string.format("**Link:** %s", permalink))
+    else
+        table.insert(lines, string.format("### %s:%d", note.file, note.line))
+    end
+
+    table.insert(lines, string.format("Added: %s", note.created_at:sub(1, 10)))
+    table.insert(lines, "")
+    table.insert(lines, note.text)
+    table.insert(lines, "")
+    table.insert(lines, "---")
+    table.insert(lines, "")
+end
+
 --- Export all notes to markdown
 --- @param filepath string|nil output path (defaults to ./audit-report.md)
 function M.export(filepath)
@@ -678,23 +780,7 @@ function M.export(filepath)
             table.insert(lines, "")
 
             for _, note in ipairs(notes) do
-                -- Generate permalink
-                local permalink =
-                    generate_permalink(session.host, session.owner, session.repo, note.commit, note.file, note.line)
-
-                if permalink then
-                    table.insert(lines, string.format("### %s:%d", note.file, note.line))
-                    table.insert(lines, string.format("**Link:** %s", permalink))
-                else
-                    table.insert(lines, string.format("### %s:%d", note.file, note.line))
-                end
-
-                table.insert(lines, string.format("Added: %s", note.created_at:sub(1, 10)))
-                table.insert(lines, "")
-                table.insert(lines, note.text)
-                table.insert(lines, "")
-                table.insert(lines, "---")
-                table.insert(lines, "")
+                append_note_export(lines, session, note)
             end
         end
     end
@@ -712,6 +798,68 @@ function M.export(filepath)
 
     -- Use echo instead of notify to avoid "Press ENTER" prompt
     vim.cmd(string.format("echo \"Exported %d notes to %s\"", #notes_data.notes, output_path))
+end
+
+--- Export note at cursor to markdown
+--- @param filepath string|nil output path (defaults to ./audit-note.md)
+function M.export_note(filepath)
+    local session = get_current_session()
+    if not session then
+        return
+    end
+
+    local output_path = filepath or "./audit-note.md"
+    local parts = vim.fn.getpos(".")
+    local line = parts[2]
+
+    local notes_data = storage.load_notes(session.path)
+    local notes_at_line = get_notes_at_line(notes_data, session.relative_file, line)
+    if #notes_at_line == 0 then
+        return
+    end
+
+    local function export_note(item)
+        local lines = {}
+        append_note_export(lines, session, item.note)
+
+        local file_handle = io.open(output_path, "w")
+        if not file_handle then
+            vim.notify("Failed to write export file: " .. output_path, vim.log.levels.ERROR)
+            return
+        end
+
+        file_handle:write(table.concat(lines, "\n"))
+        file_handle:close()
+
+        vim.cmd(string.format("echo \"Exported note to %s\"", output_path))
+    end
+
+    if #notes_at_line == 1 then
+        export_note(notes_at_line[1])
+        return
+    end
+
+    local items = {}
+    for _, item in ipairs(notes_at_line) do
+        table.insert(items, {
+            index = item.index,
+            display = note_preview(item.note),
+            note = item.note,
+        })
+    end
+
+    vim.ui.select(items, {
+        prompt = string.format("Select note to export (%d found):", #notes_at_line),
+        format_item = function(item)
+            return item.display
+        end,
+    }, function(choice)
+        if not choice then
+            return
+        end
+
+        export_note(choice)
+    end)
 end
 
 --- Show audit session statistics
