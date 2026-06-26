@@ -4,6 +4,29 @@ local Highlights = require("annotate.highlights")
 
 local M = {}
 
+local NOTE_TYPES = { "finding", "question", "safe", "suggestion", "comment", "invariant" }
+
+local function is_valid_note_type(note_type)
+    for _, valid_type in ipairs(NOTE_TYPES) do
+        if note_type == valid_type then
+            return true
+        end
+    end
+
+    return false
+end
+
+local function is_path_in_repo(path, repo_root)
+    local absolute_path = vim.fn.fnamemodify(path, ":p")
+    local normalized_root = vim.fn.fnamemodify(repo_root, ":p")
+
+    if not normalized_root:match("/$") then
+        normalized_root = normalized_root .. "/"
+    end
+
+    return absolute_path:sub(1, #normalized_root) == normalized_root
+end
+
 ---@class AnnotateSession
 ---@field path string session directory path
 ---@field repo_root string absolute path to repo root
@@ -82,22 +105,21 @@ local function get_current_session(create_if_missing)
         end
 
         -- Check for other audit sessions
-        local existing_audits = git.find_existing_audits(
-            storage.get_data_path(), host, owner, repo
-        )
+        local existing_audits = git.find_existing_audits(storage.get_data_path(), host, owner, repo)
 
         if #existing_audits > 0 then
             -- Use echo instead of notify to avoid "Press ENTER" prompt
-            vim.cmd(string.format(
-                'echom "Creating new audit session for commit %s. Found %d existing audit(s) at: %s"',
-                head_commit,
-                #existing_audits,
-                table.concat(existing_audits, ", ")
-            ))
+            vim.cmd(
+                string.format(
+                    "echom \"Creating new audit session for commit %s. Found %d existing audit(s) at: %s\"",
+                    head_commit,
+                    #existing_audits,
+                    table.concat(existing_audits, ", ")
+                )
+            )
         end
 
-        session_path = storage.init_session(host, owner, repo, head_commit,
-                                           repo_root, remote_url)
+        session_path = storage.init_session(host, owner, repo, head_commit, repo_root, remote_url)
     end
 
     -- Load notes and create highlights
@@ -125,45 +147,45 @@ end
 function M.setup()
     -- Define signs for each type with emoji
     vim.fn.sign_define("AnnotateFinding", {
-        text = '🔴',
-        texthl = 'AnnotateFinding'
+        text = "🔴",
+        texthl = "AnnotateFinding",
     })
-    
+
     vim.fn.sign_define("AnnotateQuestion", {
-        text = '🟡',
-        texthl = 'AnnotateQuestion'
+        text = "🟡",
+        texthl = "AnnotateQuestion",
     })
-    
+
     vim.fn.sign_define("AnnotateSafe", {
-        text = '🟢',
-        texthl = 'AnnotateSafe'
+        text = "🟢",
+        texthl = "AnnotateSafe",
     })
-    
+
     vim.fn.sign_define("AnnotateSuggestion", {
-        text = '🔵',
-        texthl = 'AnnotateSuggestion'
+        text = "🔵",
+        texthl = "AnnotateSuggestion",
     })
-    
+
     vim.fn.sign_define("AnnotateComment", {
-        text = '⚪',
-        texthl = 'AnnotateComment'
+        text = "⚪",
+        texthl = "AnnotateComment",
     })
-    
+
     vim.fn.sign_define("AnnotateInvariant", {
-        text = '🟣',
-        texthl = 'AnnotateInvariant'
+        text = "🟣",
+        texthl = "AnnotateInvariant",
     })
-    
+
     -- Define highlight colors
-    vim.cmd [[highlight AnnotateFinding guifg=#FF6B6B]]
-    vim.cmd [[highlight AnnotateQuestion guifg=#FFD93D]]
-    vim.cmd [[highlight AnnotateSafe guifg=#6BCF7F]]
-    vim.cmd [[highlight AnnotateSuggestion guifg=#4ECDC4]]
-    vim.cmd [[highlight AnnotateComment guifg=#AAAAAA]]
-    vim.cmd [[highlight AnnotateInvariant guifg=#9B59B6]]
-    
+    vim.cmd([[highlight AnnotateFinding guifg=#FF6B6B]])
+    vim.cmd([[highlight AnnotateQuestion guifg=#FFD93D]])
+    vim.cmd([[highlight AnnotateSafe guifg=#6BCF7F]])
+    vim.cmd([[highlight AnnotateSuggestion guifg=#4ECDC4]])
+    vim.cmd([[highlight AnnotateComment guifg=#AAAAAA]])
+    vim.cmd([[highlight AnnotateInvariant guifg=#9B59B6]])
+
     -- Refresh highlights on buffer enter
-    autocmd({"BufEnter"}, {
+    autocmd({ "BufEnter" }, {
         group = AnnotateGroup,
         pattern = "*",
         callback = function()
@@ -171,7 +193,16 @@ function M.setup()
             if session then
                 session.highlights:refresh_highlights()
             end
-        end
+        end,
+    })
+
+    vim.api.nvim_create_user_command("AnnotateCaptureQf", function(opts)
+        M.capture_qf(opts.args ~= "" and opts.args or nil)
+    end, {
+        nargs = "?",
+        complete = function()
+            return NOTE_TYPES
+        end,
     })
 end
 
@@ -185,7 +216,7 @@ local function calculate_stats(notes)
         safe = 0,
         suggestion = 0,
         comment = 0,
-        invariant = 0
+        invariant = 0,
     }
 
     for _, note in ipairs(notes) do
@@ -199,27 +230,32 @@ end
 --- @param note_type string
 --- @param text string
 function M.add_note(note_type, text)
-    local session = get_current_session(true)  -- Create session if needed
+    if not is_valid_note_type(note_type) then
+        vim.notify("Invalid note type: " .. note_type, vim.log.levels.ERROR)
+        return
+    end
+
+    local session = get_current_session(true) -- Create session if needed
     if not session then
         return
     end
-    
+
     local parts = vim.fn.getpos(".")
     local line = parts[2]
-    
+
     local note = {
         file = session.relative_file,
         line = line,
         type = note_type,
         text = text,
         created_at = os.date("!%Y-%m-%dT%H:%M:%SZ"),
-        commit = session.commit
+        commit = session.commit,
     }
-    
+
     -- Load existing notes
     local notes_data = storage.load_notes(session.path)
     table.insert(notes_data.notes, note)
-    
+
     -- Sort by file, then line
     table.sort(notes_data.notes, function(a, b)
         if a.file == b.file then
@@ -227,56 +263,146 @@ function M.add_note(note_type, text)
         end
         return a.file < b.file
     end)
-    
+
     -- Save
     storage.save_notes(session.path, notes_data)
-    
+
     -- Update metadata timestamp
     local metadata = storage.load_metadata(session.path)
     metadata.last_modified = os.date("!%Y-%m-%dT%H:%M:%SZ")
     storage.save_metadata(session.path, metadata)
-    
+
     -- Refresh highlights
-    session.highlights = Highlights.AnnotateHighlights:new(
-        notes_data.notes, session.relative_file
-    )
+    session.highlights = Highlights.AnnotateHighlights:new(notes_data.notes, session.relative_file)
     session.highlights:refresh_highlights()
+end
+
+--- Capture current quickfix list entries as notes
+--- @param note_type string|nil note type to use for captured entries
+function M.capture_qf(note_type)
+    note_type = note_type or "comment"
+    if not is_valid_note_type(note_type) then
+        vim.notify("Invalid note type: " .. note_type, vim.log.levels.ERROR)
+        return
+    end
+
+    local session = get_current_session(true)
+    if not session then
+        return
+    end
+
+    local qf_list = vim.fn.getqflist()
+    if #qf_list == 0 then
+        vim.notify("Quickfix list is empty", vim.log.levels.INFO)
+        return
+    end
+
+    local notes_data = storage.load_notes(session.path)
+    local existing = {}
+    for _, note in ipairs(notes_data.notes) do
+        existing[string.format("%s:%d:%s:%s", note.file, note.line, note.type, note.text)] = true
+    end
+
+    local captured = 0
+    local skipped = 0
+    local created_at = os.date("!%Y-%m-%dT%H:%M:%SZ")
+
+    for _, item in ipairs(qf_list) do
+        local file = item.filename
+        if (not file or file == "") and item.bufnr and item.bufnr > 0 then
+            file = vim.api.nvim_buf_get_name(item.bufnr)
+        end
+
+        if file and file ~= "" and item.lnum and item.lnum > 0 and is_path_in_repo(file, session.repo_root) then
+            local relative_file = git.get_relative_path(file, session.repo_root)
+            local text = item.text or ""
+            if text == "" then
+                text = "Quickfix item"
+            end
+
+            local key = string.format("%s:%d:%s:%s", relative_file, item.lnum, note_type, text)
+            if not existing[key] then
+                table.insert(notes_data.notes, {
+                    file = relative_file,
+                    line = item.lnum,
+                    type = note_type,
+                    text = text,
+                    created_at = created_at,
+                    commit = session.commit,
+                })
+                existing[key] = true
+                captured = captured + 1
+            else
+                skipped = skipped + 1
+            end
+        else
+            skipped = skipped + 1
+        end
+    end
+
+    if captured == 0 then
+        vim.notify(string.format("Captured 0 quickfix entries (%d skipped)", skipped), vim.log.levels.INFO)
+        return
+    end
+
+    table.sort(notes_data.notes, function(a, b)
+        if a.file == b.file then
+            return a.line < b.line
+        end
+        return a.file < b.file
+    end)
+
+    storage.save_notes(session.path, notes_data)
+
+    local metadata = storage.load_metadata(session.path)
+    metadata.last_modified = os.date("!%Y-%m-%dT%H:%M:%SZ")
+    storage.save_metadata(session.path, metadata)
+
+    session.highlights = Highlights.AnnotateHighlights:new(notes_data.notes, session.relative_file)
+    session.highlights:refresh_highlights()
+
+    vim.notify(
+        string.format(
+            "Captured %d quickfix entr%s as %s notes (%d skipped)",
+            captured,
+            captured == 1 and "y" or "ies",
+            note_type,
+            skipped
+        ),
+        vim.log.levels.INFO
+    )
 end
 
 --- Add note with type selection menu
 function M.add()
     -- Show selection menu
-    vim.ui.select(
-        {'finding', 'question', 'safe', 'suggestion', 'comment', 'invariant'},
-        {
-            prompt = 'Select note type:',
-            format_item = function(item)
-                local icons = {
-                    finding = '🔴 Finding',
-                    question = '🟡 Question',
-                    safe = '🟢 Safe',
-                    suggestion = '🔵 Suggestion',
-                    comment = '⚪ Comment',
-                    invariant = '🟣 Invariant'
-                }
-                return icons[item]
-            end
-        },
-        function(choice)
-            if not choice then
-                return  -- User cancelled
-            end
-
-            -- Get note text
-            local text = vim.fn.input({prompt = "Note: "})
-            if text == "" then
-                return  -- User cancelled or empty input
-            end
-
-            -- Add the note
-            M.add_note(choice, text)
+    vim.ui.select({ "finding", "question", "safe", "suggestion", "comment", "invariant" }, {
+        prompt = "Select note type:",
+        format_item = function(item)
+            local icons = {
+                finding = "🔴 Finding",
+                question = "🟡 Question",
+                safe = "🟢 Safe",
+                suggestion = "🔵 Suggestion",
+                comment = "⚪ Comment",
+                invariant = "🟣 Invariant",
+            }
+            return icons[item]
+        end,
+    }, function(choice)
+        if not choice then
+            return -- User cancelled
         end
-    )
+
+        -- Get note text
+        local text = vim.fn.input({ prompt = "Note: " })
+        if text == "" then
+            return -- User cancelled or empty input
+        end
+
+        -- Add the note
+        M.add_note(choice, text)
+    end)
 end
 
 --- Remove note at cursor
@@ -285,28 +411,28 @@ function M.rm()
     if not session then
         return
     end
-    
+
     local parts = vim.fn.getpos(".")
     local line = parts[2]
-    
+
     -- Load all notes
     local notes_data = storage.load_notes(session.path)
-    
+
     -- Find notes at this line in this file
     local notes_at_line = {}
     for i, note in ipairs(notes_data.notes) do
         if note.file == session.relative_file and note.line == line then
-            table.insert(notes_at_line, {index = i, note = note})
+            table.insert(notes_at_line, { index = i, note = note })
         end
     end
-    
+
     if #notes_at_line == 0 then
         return
     end
-    
+
     -- Close any open floating window before deleting
     session.highlights:close_notes()
-    
+
     -- If only one note, delete it directly
     if #notes_at_line == 1 then
         table.remove(notes_data.notes, notes_at_line[1].index)
@@ -323,28 +449,28 @@ function M.rm()
                 index = i,
                 note_index = item.index,
                 display = string.format("[%s] %s", note.type:upper(), preview),
-                note = note
+                note = note,
             })
         end
-        
+
         -- Add "Delete all" option
         table.insert(items, 1, {
             index = 0,
             note_index = nil,
             display = "🗑️  Delete ALL notes on this line",
-            delete_all = true
+            delete_all = true,
         })
-        
+
         vim.ui.select(items, {
             prompt = string.format("Select note to delete (%d found):", #notes_at_line),
             format_item = function(item)
                 return item.display
-            end
+            end,
         }, function(choice)
             if not choice then
-                return  -- User cancelled
+                return -- User cancelled
             end
-            
+
             if choice.delete_all then
                 -- Delete all notes on this line (iterate backwards to maintain indices)
                 for i = #notes_at_line, 1, -1 do
@@ -354,41 +480,37 @@ function M.rm()
                 -- Delete selected note
                 table.remove(notes_data.notes, choice.note_index)
             end
-            
+
             -- Save
             storage.save_notes(session.path, notes_data)
-            
+
             -- Update metadata timestamp
             local metadata = storage.load_metadata(session.path)
             metadata.last_modified = os.date("!%Y-%m-%dT%H:%M:%SZ")
             storage.save_metadata(session.path, metadata)
-            
+
             -- Refresh highlights
-            session.highlights = Highlights.AnnotateHighlights:new(
-                notes_data.notes, session.relative_file
-            )
+            session.highlights = Highlights.AnnotateHighlights:new(notes_data.notes, session.relative_file)
             session.highlights:refresh_highlights()
-            
+
             vim.notify("Note(s) deleted", vim.log.levels.INFO)
         end)
-        
-        return  -- Async callback handles the rest
+
+        return -- Async callback handles the rest
     end
-    
+
     -- Save
     storage.save_notes(session.path, notes_data)
-    
+
     -- Update metadata timestamp
     local metadata = storage.load_metadata(session.path)
     metadata.last_modified = os.date("!%Y-%m-%dT%H:%M:%SZ")
     storage.save_metadata(session.path, metadata)
-    
+
     -- Refresh highlights
-    session.highlights = Highlights.AnnotateHighlights:new(
-        notes_data.notes, session.relative_file
-    )
+    session.highlights = Highlights.AnnotateHighlights:new(notes_data.notes, session.relative_file)
     session.highlights:refresh_highlights()
-    
+
     vim.notify("Note deleted", vim.log.levels.INFO)
 end
 
@@ -398,16 +520,16 @@ function M.rm_all()
     if not session then
         return
     end
-    
+
     -- Confirm
     local confirm = vim.fn.input("Remove all notes in this file? (y/n): ")
     if confirm:lower() ~= "y" then
         return
     end
-    
+
     -- Load all notes
     local notes_data = storage.load_notes(session.path)
-    
+
     -- Remove notes for this file
     local removed_count = 0
     for i = #notes_data.notes, 1, -1 do
@@ -417,23 +539,21 @@ function M.rm_all()
             removed_count = removed_count + 1
         end
     end
-    
+
     if removed_count == 0 then
         return
     end
-    
+
     -- Save
     storage.save_notes(session.path, notes_data)
-    
+
     -- Update metadata timestamp
     local metadata = storage.load_metadata(session.path)
     metadata.last_modified = os.date("!%Y-%m-%dT%H:%M:%SZ")
     storage.save_metadata(session.path, metadata)
-    
+
     -- Refresh highlights
-    session.highlights = Highlights.AnnotateHighlights:new(
-        notes_data.notes, session.relative_file
-    )
+    session.highlights = Highlights.AnnotateHighlights:new(notes_data.notes, session.relative_file)
     session.highlights:refresh_highlights()
 end
 
@@ -470,13 +590,11 @@ end
 local function generate_permalink(host, owner, repo, commit, file, line)
     -- Only generate for GitHub and GitLab
     if host == "github.com" then
-        return string.format("https://github.com/%s/%s/blob/%s/%s#L%d",
-                           owner, repo, commit, file, line)
+        return string.format("https://github.com/%s/%s/blob/%s/%s#L%d", owner, repo, commit, file, line)
     elseif host == "gitlab.com" then
-        return string.format("https://gitlab.com/%s/%s/-/blob/%s/%s#L%d",
-                           owner, repo, commit, file, line)
+        return string.format("https://gitlab.com/%s/%s/-/blob/%s/%s#L%d", owner, repo, commit, file, line)
     end
-    
+
     return nil
 end
 
@@ -487,27 +605,24 @@ function M.export(filepath)
     if not session then
         return
     end
-    
+
     -- Default output path
     local output_path = filepath or "./audit-report.md"
-    
+
     -- Load all notes
     local notes_data = storage.load_notes(session.path)
     local metadata = storage.load_metadata(session.path)
-    
+
     -- Generate markdown
     local lines = {}
-    
+
     -- Header
-    table.insert(lines, string.format("# Audit Report: %s/%s", 
-                                      session.owner, session.repo))
+    table.insert(lines, string.format("# Audit Report: %s/%s", session.owner, session.repo))
     table.insert(lines, string.format("Ref: %s", metadata.base_ref))
-    table.insert(lines, string.format("Started: %s", 
-                                      metadata.created_at:sub(1, 10)))
-    table.insert(lines, string.format("Last Updated: %s", 
-                                      metadata.last_modified:sub(1, 10)))
+    table.insert(lines, string.format("Started: %s", metadata.created_at:sub(1, 10)))
+    table.insert(lines, string.format("Last Updated: %s", metadata.last_modified:sub(1, 10)))
     table.insert(lines, "")
-    
+
     -- Summary statistics
     local stats = calculate_stats(notes_data.notes)
     table.insert(lines, "## Summary")
@@ -520,7 +635,7 @@ function M.export(filepath)
     table.insert(lines, "")
     table.insert(lines, "---")
     table.insert(lines, "")
-    
+
     -- Group notes by type
     local by_type = {
         finding = {},
@@ -528,13 +643,13 @@ function M.export(filepath)
         safe = {},
         suggestion = {},
         comment = {},
-        invariant = {}
+        invariant = {},
     }
-    
+
     for _, note in ipairs(notes_data.notes) do
         table.insert(by_type[note.type], note)
     end
-    
+
     -- Sort notes within each type by file, then line
     for _, notes in pairs(by_type) do
         table.sort(notes, function(a, b)
@@ -544,40 +659,37 @@ function M.export(filepath)
             return a.file < b.file
         end)
     end
-    
+
     -- Output notes by type in priority order
     local type_order = {
-        {key = "finding", label = "Findings", icon = "🔴"},
-        {key = "question", label = "Questions", icon = "🟡"},
-        {key = "suggestion", label = "Suggestions", icon = "🔵"},
-        {key = "safe", label = "Marked Safe", icon = "🟢"},
-        {key = "comment", label = "Comments", icon = "⚪"},
-        {key = "invariant", label = "Invariants", icon = "🟣"},
+        { key = "finding", label = "Findings", icon = "🔴" },
+        { key = "question", label = "Questions", icon = "🟡" },
+        { key = "suggestion", label = "Suggestions", icon = "🔵" },
+        { key = "safe", label = "Marked Safe", icon = "🟢" },
+        { key = "comment", label = "Comments", icon = "⚪" },
+        { key = "invariant", label = "Invariants", icon = "🟣" },
     }
-    
+
     for _, type_info in ipairs(type_order) do
         local notes = by_type[type_info.key]
-        
+
         if #notes > 0 then
             table.insert(lines, string.format("## %s %s", type_info.icon, type_info.label))
             table.insert(lines, "")
-            
+
             for _, note in ipairs(notes) do
                 -- Generate permalink
-                local permalink = generate_permalink(
-                    session.host, session.owner, session.repo,
-                    note.commit, note.file, note.line
-                )
-                
+                local permalink =
+                    generate_permalink(session.host, session.owner, session.repo, note.commit, note.file, note.line)
+
                 if permalink then
                     table.insert(lines, string.format("### %s:%d", note.file, note.line))
                     table.insert(lines, string.format("**Link:** %s", permalink))
                 else
                     table.insert(lines, string.format("### %s:%d", note.file, note.line))
                 end
-                
-                table.insert(lines, string.format("Added: %s", 
-                                                  note.created_at:sub(1, 10)))
+
+                table.insert(lines, string.format("Added: %s", note.created_at:sub(1, 10)))
                 table.insert(lines, "")
                 table.insert(lines, note.text)
                 table.insert(lines, "")
@@ -586,7 +698,7 @@ function M.export(filepath)
             end
         end
     end
-    
+
     -- Write to file
     local output = table.concat(lines, "\n")
     local file_handle = io.open(output_path, "w")
@@ -594,13 +706,12 @@ function M.export(filepath)
         vim.notify("Failed to write export file: " .. output_path, vim.log.levels.ERROR)
         return
     end
-    
+
     file_handle:write(output)
     file_handle:close()
-    
+
     -- Use echo instead of notify to avoid "Press ENTER" prompt
-    vim.cmd(string.format('echo "Exported %d notes to %s"', 
-                         #notes_data.notes, output_path))
+    vim.cmd(string.format("echo \"Exported %d notes to %s\"", #notes_data.notes, output_path))
 end
 
 --- Show audit session statistics
@@ -629,8 +740,7 @@ function M.stats()
 
     -- Build display message
     local lines = {
-        string.format("Audit Session: %s/%s/%s",
-                      session.host, session.owner, session.repo),
+        string.format("Audit Session: %s/%s/%s", session.host, session.owner, session.repo),
         string.format("Commit: %s", session.commit),
         string.format("Started: %s", metadata.created_at:sub(1, 10)),
         "",
@@ -653,24 +763,21 @@ function M.stats()
     local width = 50
     local height = #lines
     local win = vim.api.nvim_open_win(buf, true, {
-        relative = 'editor',
+        relative = "editor",
         width = width,
         height = height,
         row = math.floor((vim.o.lines - height) / 2),
         col = math.floor((vim.o.columns - width) / 2),
-        style = 'minimal',
-        border = 'rounded',
-        title = ' Audit Statistics ',
-        title_pos = 'center'
+        style = "minimal",
+        border = "rounded",
+        title = " Audit Statistics ",
+        title_pos = "center",
     })
 
     -- Close on any key press
-    vim.api.nvim_buf_set_keymap(buf, 'n', '<Esc>', ':close<CR>',
-                                {nowait = true, noremap = true, silent = true})
-    vim.api.nvim_buf_set_keymap(buf, 'n', 'q', ':close<CR>',
-                                {nowait = true, noremap = true, silent = true})
-    vim.api.nvim_buf_set_keymap(buf, 'n', '<CR>', ':close<CR>',
-                                {nowait = true, noremap = true, silent = true})
+    vim.api.nvim_buf_set_keymap(buf, "n", "<Esc>", ":close<CR>", { nowait = true, noremap = true, silent = true })
+    vim.api.nvim_buf_set_keymap(buf, "n", "q", ":close<CR>", { nowait = true, noremap = true, silent = true })
+    vim.api.nvim_buf_set_keymap(buf, "n", "<CR>", ":close<CR>", { nowait = true, noremap = true, silent = true })
 end
 
 --- Clean empty audit sessions for current repository
@@ -702,12 +809,18 @@ function M.clean()
         local base_path = storage.get_data_path()
         local removed = storage.clean_empty_sessions(base_path, parsed.host, parsed.owner, parsed.repo)
 
-        vim.notify(string.format("Cleaned %d empty audit session(s) for %s/%s", removed, parsed.owner, parsed.repo), vim.log.levels.INFO)
+        vim.notify(
+            string.format("Cleaned %d empty audit session(s) for %s/%s", removed, parsed.owner, parsed.repo),
+            vim.log.levels.INFO
+        )
     else
         local base_path = storage.get_data_path()
         local removed = storage.clean_empty_sessions(base_path, session.host, session.owner, session.repo)
 
-        vim.notify(string.format("Cleaned %d empty audit session(s) for %s/%s", removed, session.owner, session.repo), vim.log.levels.INFO)
+        vim.notify(
+            string.format("Cleaned %d empty audit session(s) for %s/%s", removed, session.owner, session.repo),
+            vim.log.levels.INFO
+        )
     end
 end
 
