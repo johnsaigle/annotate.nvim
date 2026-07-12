@@ -936,7 +936,7 @@ function M.clean()
     if not session then
         -- Try to get basic git info without creating a session
         if not git.is_git_repo() then
-            vim.notify("Not in a git repository.", vim.log.levels.ERROR)
+            vim.notify("Not in a git repository.", vim.log.levels.INFO)
             return
         end
 
