@@ -82,8 +82,9 @@ end
 
 --- Get or create session for current file
 --- @param create_if_missing boolean whether to create session if it doesn't exist
+--- @param notify_on_failure boolean whether to report session setup failures to the user
 --- @return AnnotateSession|nil
-local function get_current_session(create_if_missing)
+local function get_current_session(create_if_missing, notify_on_failure)
     local current_file = get_current_name()
 
     -- Check if we already have a session for this file
@@ -102,24 +103,32 @@ local function get_current_session(create_if_missing)
     local head_commit = git.get_head_commit()
 
     if not repo_root then
-        vim.notify("Failed to get git repository root.", vim.log.levels.ERROR)
+        if notify_on_failure then
+            vim.notify("Failed to get git repository root.", vim.log.levels.ERROR)
+        end
         return nil
     end
 
     if not remote_url then
-        vim.notify("No git remote found. Annotate requires a remote origin.", vim.log.levels.ERROR)
+        if notify_on_failure then
+            vim.notify("No git remote found. Annotate requires a remote origin.", vim.log.levels.ERROR)
+        end
         return nil
     end
 
     if not head_commit then
-        vim.notify("Failed to get git HEAD commit.", vim.log.levels.ERROR)
+        if notify_on_failure then
+            vim.notify("Failed to get git HEAD commit.", vim.log.levels.ERROR)
+        end
         return nil
     end
 
     -- Parse git URL
     local parsed = git.parse_git_url(remote_url)
     if not parsed then
-        vim.notify("Failed to parse git remote URL: " .. remote_url, vim.log.levels.ERROR)
+        if notify_on_failure then
+            vim.notify("Failed to parse git remote URL: " .. remote_url, vim.log.levels.ERROR)
+        end
         return nil
     end
 
@@ -220,7 +229,8 @@ function M.setup()
         group = AnnotateGroup,
         pattern = "*",
         callback = function()
-            local session = get_current_session()
+            -- Buffer transitions are passive; unsupported repositories should not interrupt editing.
+            local session = get_current_session(false, false)
             if session then
                 session.highlights:refresh_highlights()
             end
@@ -274,7 +284,7 @@ function M.add_note(note_type, text)
         return
     end
 
-    local session = get_current_session(true) -- Create session if needed
+    local session = get_current_session(true, true) -- Create session if needed
     if not session then
         return
     end
@@ -325,7 +335,7 @@ function M.capture_qf(note_type)
         return
     end
 
-    local session = get_current_session(true)
+    local session = get_current_session(true, true)
     if not session then
         return
     end
@@ -446,7 +456,7 @@ end
 
 --- Remove note at cursor
 function M.rm()
-    local session = get_current_session()
+    local session = get_current_session(false, true)
     if not session then
         return
     end
@@ -545,7 +555,7 @@ end
 
 --- Edit note at cursor
 function M.edit()
-    local session = get_current_session()
+    local session = get_current_session(false, true)
     if not session then
         return
     end
@@ -600,7 +610,7 @@ end
 
 --- Remove all notes in current file
 function M.rm_all()
-    local session = get_current_session()
+    local session = get_current_session(false, true)
     if not session then
         return
     end
@@ -643,7 +653,7 @@ end
 
 --- Navigate to next note
 function M.nav_next()
-    local session = get_current_session()
+    local session = get_current_session(false, true)
     if session then
         session.highlights:nav_next()
     end
@@ -651,7 +661,7 @@ end
 
 --- Show notes at cursor
 function M.show_notes()
-    local session = get_current_session()
+    local session = get_current_session(false, true)
     if session then
         session.highlights:show_notes()
     end
@@ -703,7 +713,7 @@ end
 --- Export all notes to markdown
 --- @param filepath string|nil output path (defaults to ./audit-report.md)
 function M.export(filepath)
-    local session = get_current_session()
+    local session = get_current_session(false, true)
     if not session then
         return
     end
@@ -803,7 +813,7 @@ end
 --- Export note at cursor to markdown
 --- @param filepath string|nil output path (defaults to ./audit-note.md)
 function M.export_note(filepath)
-    local session = get_current_session()
+    local session = get_current_session(false, true)
     if not session then
         return
     end
@@ -864,7 +874,7 @@ end
 
 --- Show audit session statistics
 function M.stats()
-    local session = get_current_session()
+    local session = get_current_session(false, true)
     if not session then
         return
     end
